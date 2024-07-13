@@ -13,6 +13,7 @@ import com.yupi.springbootinit.constant.CommonConstant;
 import com.yupi.springbootinit.constant.UserConstant;
 import com.yupi.springbootinit.exception.BusinessException;
 import com.yupi.springbootinit.exception.ThrowUtils;
+import com.yupi.springbootinit.manager.RedisLimiterManager;
 import com.yupi.springbootinit.model.dto.chart.*;
 import com.yupi.springbootinit.model.entity.Chart;
 import com.yupi.springbootinit.model.entity.User;
@@ -53,6 +54,8 @@ public class ChartController {
     private UserService userService;
     @Resource
     private QianfanAiApi qianfanAiApi;
+    @Resource
+    private RedisLimiterManager redisLimiterManager;
 
     // region 增删改查
 
@@ -271,9 +274,12 @@ public class ChartController {
         //2、后缀
         String originalFilename = multipartFile.getOriginalFilename();
         String suffix = FileUtil.getSuffix(originalFilename);
-        List<String> standardSuffix = Arrays.asList("png", "jpg", "jpeg", "svg", "webp");
+        List<String> standardSuffix = Arrays.asList("xls", "xlsx");
         ThrowUtils.throwIf(!standardSuffix.contains(suffix),ErrorCode.PARAMS_ERROR,"文件后缀非法");
 
+        //限流判断-每个用户针对这个方法一个限流器
+        User loginUser = userService.getLoginUser(request);
+        redisLimiterManager.doRateLimit("genChartByAi_"+loginUser.getId());
         //方法一：写一个ai的prompt，这是针对最原始的ai接口：（如国外的openai，国内的百度千帆等）
         //这种prompt需要写样例，格式，等等，以期待ai的回复能满足我们的要求
         //读取用户上传的excel文件，进行处理
