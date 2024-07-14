@@ -35,6 +35,8 @@ import javax.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ThreadPoolExecutor;
 
 /**
  * 帖子接口
@@ -49,7 +51,8 @@ public class ChartController {
 
     @Resource
     private ChartService chartService;
-
+    @Resource
+    private ThreadPoolExecutor threadPoolExecutor;
     @Resource
     private UserService userService;
     @Resource
@@ -326,58 +329,98 @@ public class ChartController {
         //TODO:方法二：使用sdk，里面有丰富的ai模型，不需要prompt——这种直接传入要求即可——鱼聪明ai是有的
 
 
-        //喂给ai
-        String result = qianfanAiApi.doChat(userInput.toString());
-
-        //处理一下返回的“数据分析结果”
-        //使用split规整的返回ai的输出
-        String[] split = result.split("【【【【【【");
-
-        if(split.length < 3){
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"AI生成错误");
-        }
-        String genChart = split[1];
-        String genResult = split[2];
-        //正则表达式处理给echarts生成的前端代码
-        /*if(genChart.contains("option")){
-            Pattern pattern = Pattern.compile("option = (\\{.*?\\});", Pattern.DOTALL);
-            Matcher matcher = pattern.matcher(genChart);
-            if (matcher.find()) {
-                genChart = matcher.group(1);
-            } else {
-                throw new BusinessException(ErrorCode.SYSTEM_ERROR,"无法生成图表");
-            }
-        }*/
-
-
-        //处理\\n
-        genChart = genChart.replace("\\n","\n");
-        genResult = genResult.replace("\\n","");
-        //处理掉genResult后面的元数据
-        int index = genResult.indexOf("\"");
-            // 如果找到"，则截取"之前的字符串
-        if (index != -1) {
-            genResult = genResult.substring(0, index);
-        }
+        //异步化：step1-将任务存入数据库
         //存入数据库
         Chart chart = new Chart();
         chart.setName(name);
         chart.setGoal(goal);
         chart.setChartData(res);
         chart.setChartType(chartType);
-        chart.setGenChart(genChart);
-        chart.setGenResult(genResult);
+        chart.setStatus("wait");
+        chart.setUserId(loginUser.getId());
+
         boolean isSave = chartService.save(chart);
         if(isSave == false){
             throw new BusinessException(ErrorCode.SYSTEM_ERROR,"未能存入数据库");
         }
+
+        //将ai生成异步化
+        //todo 给任务添加超时时间，超时自动设置为失败
+        CompletableFuture.runAsync(()->{
+            //修改状态为running
+            Chart updateChart = new Chart();
+            updateChart.setId(chart.getId());
+            updateChart.setStatus("running");
+            boolean isUpdate = chartService.updateById(updateChart);
+            if(!isUpdate){
+                handleChartUpdateError(chart.getId(),"更新图表信息失败");
+                return;
+            }
+            //喂给ai
+            String result = null;
+            try {
+                result = qianfanAiApi.doChat(userInput.toString());
+            } catch (JSONException e) {
+                throw new RuntimeException(e);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+
+            //处理一下返回的“数据分析结果”
+            //使用split规整的返回ai的输出
+            String[] split = result.split("【【【【【【");
+
+            if(split.length < 3){
+                handleChartUpdateError(chart.getId(),"AI生成错误");
+                return;
+            }
+            String genChart = split[1];
+            String genResult = split[2];
+            //处理\\n
+            genChart = genChart.replace("\\n","\n");
+            genResult = genResult.replace("\\n","");
+            //处理掉genResult后面的元数据
+            int index = genResult.indexOf("\"");
+            // 如果找到"，则截取"之前的字符串
+            if (index != -1) {
+                genResult = genResult.substring(0, index);
+            }
+            //再次更新状态，设置生成后的图表信息和结论信息
+            Chart updateChartResult = new Chart();
+            updateChartResult.setId(chart.getId());
+            updateChartResult.setGenChart(genChart);
+            updateChartResult.setGenResult(genResult);
+            //todo 定义状态为枚举
+
+            updateChartResult.setStatus("succeed");
+            boolean isUpdateResult = chartService.updateById(updateChart);
+            if(!isUpdateResult){
+                handleChartUpdateError(chart.getId(),"更新结果失败");
+
+            }
+
+        },threadPoolExecutor);
+
         //作为封装进vo返回前端
         BiResponse biResponse = new BiResponse();
-        biResponse.setGenChart(genChart);
-        biResponse.setGenResult(genResult);
-
+        biResponse.setChartId(chart.getId());
         return ResultUtils.success(biResponse);
 
+
+
+
+
+    }
+    private void handleChartUpdateError(Long chartId,String execMessage){
+        //更新数据库状态为失败，并且抛出异常
+        Chart updateChart = new Chart();
+        updateChart.setId(chartId);
+        updateChart.setStatus("failed");
+        updateChart.setExecMessage(execMessage);
+        boolean suc = chartService.updateById(updateChart);
+        if(!suc){
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"处理更新错误的更新操作异常");
+        }
     }
 
 }
