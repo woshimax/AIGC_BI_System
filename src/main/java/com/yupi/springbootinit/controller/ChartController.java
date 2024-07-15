@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.yupi.springbootinit.annotation.AuthCheck;
 import com.yupi.springbootinit.api.QianfanAiApi;
+import com.yupi.springbootinit.bizmq.BiProducer;
 import com.yupi.springbootinit.common.BaseResponse;
 import com.yupi.springbootinit.common.DeleteRequest;
 import com.yupi.springbootinit.common.ErrorCode;
@@ -59,7 +60,8 @@ public class ChartController {
     private QianfanAiApi qianfanAiApi;
     @Resource
     private RedisLimiterManager redisLimiterManager;
-
+    @Resource
+    private BiProducer biProducer;
     // region 增删改查
 
     /**
@@ -256,7 +258,7 @@ public class ChartController {
      * @param request
      * @return
      */
-    @PostMapping("/gen")
+    @PostMapping("/gen/async")
     public BaseResponse<BiResponse> genChartByAi(@RequestPart("file") MultipartFile multipartFile,
                                              GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) throws JSONException, IOException {
 
@@ -406,10 +408,109 @@ public class ChartController {
         biResponse.setChartId(chart.getId());
         return ResultUtils.success(biResponse);
 
+    }
+
+    /**
+     * 智能分析（根据用户上传文件分析数据）
+     *
+     * @param multipartFile
+     * @param genChartByAiRequest
+     * @param request
+     * @return
+     */
+    @PostMapping("/gen/async/mq")
+    public BaseResponse<BiResponse> genChartByAiMq(@RequestPart("file") MultipartFile multipartFile,
+                                                 GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) throws JSONException, IOException {
+
+        //获取用户输入
+        String goal = genChartByAiRequest.getGoal();
+        String name = genChartByAiRequest.getName();
+        String chartType = genChartByAiRequest.getChartType();
+
+        //拿到用户输入就是做数据校验先
+        ThrowUtils.throwIf(StringUtils.isBlank(goal),ErrorCode.PARAMS_ERROR,"目标为空");
+        ThrowUtils.throwIf(StringUtils.isBlank(name) && name.length() > 100,ErrorCode.PARAMS_ERROR,"名称太长");
+
+        //文件校验逻辑——上传功能必做
+        //1、大小
+        long size = multipartFile.getSize();
+        final long ONE_MB = 1024*1024L;
+        ThrowUtils.throwIf(size > ONE_MB,ErrorCode.PARAMS_ERROR,"文件过大");
+        //2、后缀
+        String originalFilename = multipartFile.getOriginalFilename();
+        String suffix = FileUtil.getSuffix(originalFilename);
+        List<String> standardSuffix = Arrays.asList("xls", "xlsx");
+        ThrowUtils.throwIf(!standardSuffix.contains(suffix),ErrorCode.PARAMS_ERROR,"文件后缀非法");
+
+        //限流判断-每个用户针对这个方法一个限流器
+        User loginUser = userService.getLoginUser(request);
+        redisLimiterManager.doRateLimit("genChartByAi_"+loginUser.getId());
+        //方法一：写一个ai的prompt，这是针对最原始的ai接口：（如国外的openai，国内的百度千帆等）
+        //这种prompt需要写样例，格式，等等，以期待ai的回复能满足我们的要求
+        //读取用户上传的excel文件，进行处理
+        String res = ExcelUtils.excelToCsv(multipartFile);
+        //将目标，类别等文字进行区分以及拼接——这个userInput就是要传给ai接口进行生成的输入
+        StringBuilder userInput = new StringBuilder();
+        //预设
+        userInput.append("你是一个数据分析刊师和前端开发专家，接下来我会按照以下固定格式给你提供内容：\n" +
+                "分析需求：\n" +
+                "{数据分析的需求和目标}\n" +
+                "原始数据:\n" +
+                "{csv格式的原始数据，用,作为分隔符}\n" +
+                "请根据这两部分内容，按照以下格式生成内容（此外不要输出任何多余的开头、结尾、注释）\n" +
+                "【【【【【【\n" +
+                "{前端Echarts V5 的 option 配置对象js代码，合理地将数据进行可视化}\n" +
+                "【【【【【【\n" +
+                "{ 明确的数据分析结论、越详细越好，不要生成多余的注释或代码}\n");
+        //示例
+        userInput.append("示例：\n");
+        userInput.append("【【【【【【\n");
+        userInput.append("option ={\n" +
+                "xAxis: {\n" +
+                "type: 'category',\n" +
+                "data: ['1', '2', '3']\n" +
+                "},\n" +
+                "yAxis: {\n" +
+                "type: 'value'\n" +
+                "},\n" +
+                "series: [{\n" +
+                "data: [10, 20, 30],\n" +
+                "type: 'line'\n" +
+                "}]\n" +
+                "}").append("\n");
+        userInput.append("【【【【【【\n");
+        userInput.append("根据提供的数据，网站用户增长情况呈现出稳定的上升趋势。从数据可以看出，第一天用户人数为10人，第二天增长到20人，第三天继续增长到30人。这表明网站在这段时间内吸引了越来越多的用户。").append("\n");
 
 
 
+        //TODO:方法二：使用sdk，里面有丰富的ai模型，不需要prompt——这种直接传入要求即可——鱼聪明ai是有的
 
+
+        //异步化：step1-将任务存入数据库
+        //存入数据库
+        Chart chart = new Chart();
+        chart.setName(name);
+        chart.setGoal(goal);
+        chart.setChartData(res);
+        chart.setChartType(chartType);
+        chart.setStatus("wait");
+        chart.setUserId(loginUser.getId());
+
+        boolean isSave = chartService.save(chart);
+        if(isSave == false){
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"未能存入数据库");
+        }
+
+        Long chartId = chart.getId();
+
+        String message = chartId+"_"+userInput;
+        //发消息给消息队列，然后消费者中嵌套处理程序（ai生成）
+        biProducer.sentMessage(message);
+
+        //作为封装进vo返回前端
+        BiResponse biResponse = new BiResponse();
+        biResponse.setChartId(chart.getId());
+        return ResultUtils.success(biResponse);
     }
     private void handleChartUpdateError(Long chartId,String execMessage){
         //更新数据库状态为失败，并且抛出异常
