@@ -2,9 +2,9 @@
 <!DOCTYPE mapper
         PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.yupi.springbootinit.mapper.ChartMapper">
+<mapper namespace="com.woshimax.bi_service.mapper.ChartMapper">
 
-    <resultMap id="BaseResultMap" type="com.yupi.springbootinit.model.entity.Chart">
+    <resultMap id="BaseResultMap" type="com.woshimax.bi_service.model.entity.Chart">
             <id property="id" column="id" jdbcType="BIGINT"/>
             <result property="name" column="name" jdbcType="VARCHAR"/>
             <result property="goal" column="goal" jdbcType="VARCHAR"/>
@@ -19,9 +19,12 @@
             <result property="isDelete" column="isDelete" jdbcType="TINYINT"/>
     </resultMap>
 
-    <sql id="Base_Column_List">
-        id,`name`,goal,chartData,
-        chartType,genChart,genResult,userId,
-        createTime,updateTime,isDelete
-    </sql>
+<!--    <sql id="Base_Column_List">-->
+<!--        id,`name`,goal,chartData,-->
+<!--        chartType,genChart,genResult,userId,-->
+<!--        createTime,updateTime,isDelete-->
+<!--    </sql>-->
+    <select id="selectFromDynamicTable" resultType="map">
+        SELECT * FROM ${tableName}
+    </select>
 </mapper>
