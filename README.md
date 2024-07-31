@@ -23,4 +23,4 @@
 第三次优化：优化异步化——为了处理线程池不持久化的问题，使用RabbitMQ来充当任务队列  
 ### 3、将原始数据进行分表  
 在数据量很大的情况下，查原始数据和修改原始数据（csv格式）都是很耗时的，因此单独把原始数据分表出来，表名为chart_{id}  
-
+![image](https://github.com/woshimax/AIGC_BI_System/blob/master/img/flow_chart.jpg)
